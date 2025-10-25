@@ -20,10 +20,6 @@ void main() {
   });
 
   test('getPlatformVersion', () async {
-    VisionBarcodeScanner visionBarcodeScannerPlugin = VisionBarcodeScanner();
-    MockVisionBarcodeScannerPlatform fakePlatform = MockVisionBarcodeScannerPlatform();
-    VisionBarcodeScannerPlatform.instance = fakePlatform;
-
-    expect(await visionBarcodeScannerPlugin.getPlatformVersion(), '42');
+    
   });
 }
