@@ -28,11 +28,12 @@ class _MyAppState extends State<MyApp> {
         appBar: AppBar(title: const Text('Vision Barcode Scanner')),
         body: Stack(
           children: [
-            Positioned.fill(
+            SizedBox(
+              height: MediaQuery.of(context).size.height * 0.62,
               child: VisionBarcodeScannerView(
                 onBarcodeDetected: _onBarcodeDetected,
               ),
-            ),
+            ),          
             Align(
               alignment: Alignment.bottomCenter,
               child: Container(

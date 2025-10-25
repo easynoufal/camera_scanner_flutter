@@ -26,24 +26,40 @@ class _VisionBarcodeScannerViewState extends State<VisionBarcodeScannerView> {
 
   @override
   Widget build(BuildContext context) {
-    if (defaultTargetPlatform != TargetPlatform.iOS) {
-      return const Center(child: Text('Camera view only supported on iOS'));
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      return UiKitView(
+        viewType: _viewType,
+        onPlatformViewCreated: (int viewId) {
+          _eventChannel = EventChannel('vision_barcode_scanner/events_$viewId');
+          _subscription = _eventChannel!
+              .receiveBroadcastStream()
+              .cast<String>()
+              .listen((barcode) {
+            if (widget.onBarcodeDetected != null) {
+              widget.onBarcodeDetected!(barcode);
+            }
+          });
+        },
+        creationParamsCodec: const StandardMessageCodec(),
+      );
+    } else if (defaultTargetPlatform == TargetPlatform.android) {
+      return AndroidView(
+        viewType: _viewType,
+        onPlatformViewCreated: (int viewId) {
+          _eventChannel = EventChannel('vision_barcode_scanner/events_$viewId');
+          _subscription = _eventChannel!
+              .receiveBroadcastStream()
+              .cast<String>()
+              .listen((barcode) {
+            if (widget.onBarcodeDetected != null) {
+              widget.onBarcodeDetected!(barcode);
+            }
+          });
+        },
+        creationParamsCodec: const StandardMessageCodec(),
+      );
+    } else {
+      return const Center(child: Text('Camera view only supported on iOS and Android'));
     }
-
-    return UiKitView(
-      viewType: _viewType,
-      onPlatformViewCreated: (int viewId) {
-        _eventChannel = EventChannel('vision_barcode_scanner/events_$viewId');
-        _subscription = _eventChannel!
-            .receiveBroadcastStream()
-            .cast<String>()
-            .listen((barcode) {
-          if (widget.onBarcodeDetected != null) {
-            widget.onBarcodeDetected!(barcode);
-          }
-        });
-      },
-      creationParamsCodec: const StandardMessageCodec(),
-    );
   }
 }
