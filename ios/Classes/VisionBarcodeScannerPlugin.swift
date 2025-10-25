@@ -114,10 +114,14 @@ public class VisionCameraViewFactory: NSObject, FlutterPlatformViewFactory {
         viewIdentifier viewId: Int64,
         arguments args: Any?
     ) -> FlutterPlatformView {
+        let argsDict = args as? [String: Any]
+        let formats = argsDict?["formats"] as? [String]
+        
         return VisionCameraView(
             frame: frame,
             viewId: viewId,
-            messenger: messenger
+            messenger: messenger,
+            formats: formats
         )
     }
 }
@@ -125,19 +129,44 @@ public class VisionCameraViewFactory: NSObject, FlutterPlatformViewFactory {
 public class VisionCameraView: NSObject, FlutterPlatformView, AVCaptureVideoDataOutputSampleBufferDelegate {
     private let frame: CGRect
     private var eventSink: FlutterEventSink?
+    private var methodChannel: FlutterMethodChannel?
     private var captureSession: AVCaptureSession?
+    private var videoDevice: AVCaptureDevice?
     var previewLayer: AVCaptureVideoPreviewLayer?
     private let eventChannel: FlutterEventChannel
     private weak var containerView: UIView?
+    private var isScanning = true
+    private var lastSampleBuffer: CMSampleBuffer?
+    private let viewId: Int64
+    private let formats: [String]?
 
-    public init(frame: CGRect, viewId: Int64, messenger: FlutterBinaryMessenger) {
+    public init(frame: CGRect, viewId: Int64, messenger: FlutterBinaryMessenger, formats: [String]?) {
         self.frame = frame
+        self.viewId = viewId
+        self.formats = formats
         self.eventChannel = FlutterEventChannel(
             name: "vision_barcode_scanner/events_\(viewId)",
             binaryMessenger: messenger
         )
         super.init()
         self.eventChannel.setStreamHandler(self)
+        
+        // Setup method channel
+        self.methodChannel = FlutterMethodChannel(
+            name: "vision_barcode_scanner/methods_\(viewId)",
+            binaryMessenger: messenger
+        )
+        self.methodChannel?.setMethodCallHandler { [weak self] call, result in
+            switch call.method {
+            case "stopScanningAndCapture":
+                self?.stopScanningAndCapture(result: result)
+            case "toggleTorch":
+                self?.toggleTorch(result: result)
+            default:
+                result(FlutterMethodNotImplemented)
+            }
+        }
+        
         setupCamera()
     }
     
@@ -200,6 +229,8 @@ public class VisionCameraView: NSObject, FlutterPlatformView, AVCaptureVideoData
             print("Failed to get video device or input")
             return 
         }
+        
+        self.videoDevice = videoDevice
 
         if captureSession?.canAddInput(videoInput) == true {
             captureSession?.addInput(videoInput)
@@ -238,19 +269,150 @@ public class VisionCameraView: NSObject, FlutterPlatformView, AVCaptureVideoData
 
     // Process camera frames
     public func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        if isScanning {
+            // Keep the last sample buffer for capture
+            lastSampleBuffer = sampleBuffer
+        }
+        
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
         let request = VNDetectBarcodesRequest { [weak self] request, error in
+            guard let self = self, self.isScanning else { return }
             guard let results = request.results as? [VNBarcodeObservation] else { return }
             for barcode in results {
-                if let payload = barcode.payloadStringValue {
-                    self?.eventSink?(payload)
+                // Filter by supported format if specified
+                if self.shouldProcessBarcode(barcode) {
+                    if let payload = barcode.payloadStringValue {
+                        self.eventSink?(payload)
+                    }
                 }
+            }
+        }
+        
+        // Set symbologies if formats are specified
+        if let formats = formats, !formats.isEmpty && !formats.contains("allFormats") {
+            var symbologies: [VNBarcodeSymbology] = []
+            for format in formats {
+                if let symbology = symbologyFromString(format) {
+                    symbologies.append(symbology)
+                }
+            }
+            if !symbologies.isEmpty {
+                request.symbologies = symbologies
             }
         }
 
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
         try? handler.perform([request])
+    }
+    
+    private func symbologyFromString(_ format: String) -> VNBarcodeSymbology? {
+        switch format {
+        case "aztec": return .aztec
+        case "codabar": return .codabar
+        case "code128": return .Code128
+        case "code39": return .Code39
+        case "code93": return .Code93
+        case "dataMatrix": return .dataMatrix
+        case "ean13": return .EAN13
+        case "ean8": return .EAN8
+        case "itf": return .ITF14
+        case "pdf417": return .PDF417
+        case "qrCode": return .QR
+        case "upca": return .UPCE
+        case "upce": return .UPCA
+        default: return nil
+        }
+    }
+    
+    private func shouldProcessBarcode(_ barcode: VNBarcodeObservation) -> Bool {
+        guard let formats = formats, !formats.isEmpty else { return true }
+        
+        if formats.contains("allFormats") {
+            return true
+        }
+        
+        // Check if barcode's symbology matches any requested format
+        for format in formats {
+            if symbologyFromString(format) == barcode.symbology {
+                return true
+            }
+        }
+        
+        return false
+    }
+    
+    private func stopScanningAndCapture(result: @escaping FlutterResult) {
+        print("stopScanningAndCapture called")
+        isScanning = false
+        
+        guard let sampleBuffer = lastSampleBuffer else {
+            result(FlutterError(code: "NO_IMAGE", message: "No image available", details: nil))
+            return
+        }
+        
+        guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            result(FlutterError(code: "INVALID_IMAGE", message: "Invalid image buffer", details: nil))
+            return
+        }
+        
+        // Get image orientation from sample buffer
+        var orientation = CGImagePropertyOrientation.up
+        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[String: Any]],
+           let exifDict = attachments.first,
+           let orientationRaw = exifDict[kCGImagePropertyOrientation as String] as? UInt32 {
+            orientation = CGImagePropertyOrientation(rawValue: orientationRaw) ?? .up
+        }
+        
+        // Convert CIImage to UIImage with correct orientation
+        let ciImage = CIImage(cvPixelBuffer: imageBuffer)
+        let context = CIContext()
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
+            result(FlutterError(code: "IMAGE_CONVERSION", message: "Failed to convert image", details: nil))
+            return
+        }
+        
+        // Create UIImage with proper orientation
+        let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: UIImage.Orientation(rawValue: orientation.rawValue) ?? .up)
+        
+        // Convert UIImage to JPEG data
+        if let imageData = uiImage.jpegData(compressionQuality: 0.9) {
+            result(["imageData": FlutterStandardTypedData(bytes: imageData)])
+        } else {
+            result(FlutterError(code: "IMAGE_ENCODING", message: "Failed to encode image", details: nil))
+        }
+        
+        lastSampleBuffer = nil
+    }
+    
+    private func toggleTorch(result: @escaping FlutterResult) {
+        print("toggleTorch called")
+        
+        guard let device = videoDevice else {
+            result(FlutterError(code: "NO_DEVICE", message: "No video device available", details: nil))
+            return
+        }
+        
+        guard device.hasTorch else {
+            result(FlutterError(code: "NO_TORCH", message: "Device does not have torch", details: nil))
+            return
+        }
+        
+        do {
+            try device.lockForConfiguration()
+            let newState = !device.isTorchOn
+            try device.setTorchModeOn(level: 1.0)
+            if !newState {
+                device.torchMode = .off
+            }
+            device.unlockForConfiguration()
+            
+            print("Torch toggled: \(newState)")
+            result(newState)
+        } catch {
+            print("Error toggling torch: \(error)")
+            result(FlutterError(code: "TORCH_ERROR", message: "Failed to toggle torch: \(error.localizedDescription)", details: nil))
+        }
     }
 }
 

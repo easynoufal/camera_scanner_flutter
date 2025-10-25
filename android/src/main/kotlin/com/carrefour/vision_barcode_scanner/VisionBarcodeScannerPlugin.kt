@@ -2,7 +2,9 @@ package com.carrefour.vision_barcode_scanner
 
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.*
 import androidx.camera.core.*
+import androidx.camera.core.Camera
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
@@ -22,6 +24,8 @@ import io.flutter.plugin.common.MethodChannel.Result
 import io.flutter.plugin.common.PluginRegistry.Registrar
 import io.flutter.plugin.platform.PlatformView
 import io.flutter.plugin.platform.PlatformViewFactory
+import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -106,14 +110,17 @@ public class VisionCameraViewFactory(
 
     override fun create(context: Context, id: Int, args: Any?): PlatformView {
         android.util.Log.d("VisionBarcodeScanner", "VisionCameraViewFactory.create called with id: $id")
-        return VisionCameraView(context, id, messenger)
+        val argsMap = args as? Map<*, *>
+        val formats = argsMap?.get("formats") as? List<*>
+        return VisionCameraView(context, id, messenger, formats)
     }
 }
 
 class VisionCameraView(
     private val context: Context,
     private val viewId: Int,
-    private val messenger: io.flutter.plugin.common.BinaryMessenger
+    private val messenger: io.flutter.plugin.common.BinaryMessenger,
+    private val formats: List<*>?
 ) : PlatformView, LifecycleOwner {
 
     private val previewView: PreviewView = PreviewView(context).apply {
@@ -124,14 +131,53 @@ class VisionCameraView(
     private var camera: Camera? = null
     private var imageAnalyzer: ImageAnalysis? = null
     private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
-    private val barcodeScanner = BarcodeScanning.getClient()
+    private val barcodeScanner = BarcodeScanning.getClient(getBarcodeScannerOptions(formats))
     private var eventChannel: EventChannel? = null
+    private var methodChannel: MethodChannel? = null
     private var eventSink: EventChannel.EventSink? = null
     private val lifecycleRegistry = androidx.lifecycle.LifecycleRegistry(this)
+    private var isScanning = true
+    private var lastImageProxy: ImageProxy? = null
+    private var isTorchOn = false
+    
+    private fun getBarcodeScannerOptions(formats: List<*>?): BarcodeScannerOptions {
+        val optionsBuilder = BarcodeScannerOptions.Builder()
+        
+        if (formats == null || formats.isEmpty() || formats.contains("allFormats")) {
+            optionsBuilder.setBarcodeFormats(Barcode.FORMAT_ALL_FORMATS)
+        } else {
+            val barcodeFormats = mutableListOf<Int>()
+            formats.forEach { format ->
+                when (format) {
+                    "aztec" -> barcodeFormats.add(Barcode.FORMAT_AZTEC)
+                    "codabar" -> barcodeFormats.add(Barcode.FORMAT_CODABAR)
+                    "code128" -> barcodeFormats.add(Barcode.FORMAT_CODE_128)
+                    "code39" -> barcodeFormats.add(Barcode.FORMAT_CODE_39)
+                    "code93" -> barcodeFormats.add(Barcode.FORMAT_CODE_93)
+                    "dataMatrix" -> barcodeFormats.add(Barcode.FORMAT_DATA_MATRIX)
+                    "ean13" -> barcodeFormats.add(Barcode.FORMAT_EAN_13)
+                    "ean8" -> barcodeFormats.add(Barcode.FORMAT_EAN_8)
+                    "itf" -> barcodeFormats.add(Barcode.FORMAT_ITF)
+                    "pdf417" -> barcodeFormats.add(Barcode.FORMAT_PDF417)
+                    "qrCode" -> barcodeFormats.add(Barcode.FORMAT_QR_CODE)
+                    "upca" -> barcodeFormats.add(Barcode.FORMAT_UPC_A)
+                    "upce" -> barcodeFormats.add(Barcode.FORMAT_UPC_E)
+                }
+            }
+            if (barcodeFormats.isNotEmpty()) {
+                optionsBuilder.setBarcodeFormats(barcodeFormats.fold(0) { acc, format -> acc or format })
+            } else {
+                optionsBuilder.setBarcodeFormats(Barcode.FORMAT_ALL_FORMATS)
+            }
+        }
+        
+        return optionsBuilder.build()
+    }
 
     init {
         android.util.Log.d("VisionBarcodeScanner", "VisionCameraView init - viewId: $viewId")
         setupEventChannel()
+        setupMethodChannel()
         // Initialize lifecycle to CREATED state
         lifecycleRegistry.currentState = androidx.lifecycle.Lifecycle.State.CREATED
         // Delay camera setup to ensure view is ready
@@ -152,6 +198,102 @@ class VisionCameraView(
                 eventSink = null
             }
         })
+    }
+
+    private fun setupMethodChannel() {
+        methodChannel = MethodChannel(messenger, "vision_barcode_scanner/methods_$viewId")
+        methodChannel?.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "stopScanningAndCapture" -> {
+                    stopScanningAndCapture(result)
+                }
+                "toggleTorch" -> {
+                    toggleTorch(result)
+                }
+                else -> {
+                    result.notImplemented()
+                }
+            }
+        }
+    }
+    
+    private fun toggleTorch(result: MethodChannel.Result) {
+        try {
+            val cameraControl = camera?.cameraControl
+            
+            // Toggle the torch state
+            isTorchOn = !isTorchOn
+            cameraControl?.enableTorch(isTorchOn)
+            
+            android.util.Log.d("VisionBarcodeScanner", "Torch toggled: $isTorchOn")
+            result.success(isTorchOn)
+        } catch (e: Exception) {
+            android.util.Log.e("VisionBarcodeScanner", "Error toggling torch", e)
+            result.error("TORCH_ERROR", "Failed to toggle torch: ${e.message}", null)
+        }
+    }
+
+    private fun stopScanningAndCapture(result: MethodChannel.Result) {
+        android.util.Log.d("VisionBarcodeScanner", "stopScanningAndCapture called")
+        isScanning = false
+        
+        val imageProxy = lastImageProxy
+        if (imageProxy != null) {
+            val imageByteArray = imageProxyToByteArray(imageProxy)
+            result.success(mapOf("imageData" to imageByteArray))
+            lastImageProxy = null
+        } else {
+            result.error("NO_IMAGE", "No image available", null)
+        }
+    }
+
+    private fun imageProxyToByteArray(imageProxy: ImageProxy): ByteArray {
+        val mediaImage = imageProxy.image ?: throw IllegalArgumentException("Image is null")
+        
+        // Get the bitmap from media image
+        val yBuffer = imageProxy.planes[0].buffer
+        val uBuffer = imageProxy.planes[1].buffer
+        val vBuffer = imageProxy.planes[2].buffer
+
+        val ySize = yBuffer.remaining()
+        val uSize = uBuffer.remaining()
+        val vSize = vBuffer.remaining()
+
+        val nv21 = ByteArray(ySize + uSize + vSize)
+        
+        yBuffer.get(nv21, 0, ySize)
+        vBuffer.get(nv21, ySize, vSize)
+        uBuffer.get(nv21, ySize + vSize, uSize)
+
+        val yuvImage = YuvImage(nv21, ImageFormat.NV21, mediaImage.width, mediaImage.height, null)
+        val out = ByteArrayOutputStream()
+        
+        // Compress to bitmap first to handle rotation
+        yuvImage.compressToJpeg(android.graphics.Rect(0, 0, mediaImage.width, mediaImage.height), 90, out)
+        val jpegBytes = out.toByteArray()
+        
+        // Convert to bitmap and apply rotation
+        val bitmap = android.graphics.BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
+        
+        // Get rotation from ImageProxy
+        val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+        
+        // Rotate bitmap if needed
+        val rotatedBitmap = if (rotationDegrees != 0) {
+            val matrix = android.graphics.Matrix()
+            matrix.postRotate(rotationDegrees.toFloat())
+            android.graphics.Bitmap.createBitmap(
+                bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true
+            )
+        } else {
+            bitmap
+        }
+        
+        // Convert rotated bitmap back to JPEG
+        val finalOut = ByteArrayOutputStream()
+        rotatedBitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, finalOut)
+        
+        return finalOut.toByteArray()
     }
 
     private fun setupCamera() {
@@ -192,10 +334,19 @@ class VisionCameraView(
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build()
                         .also {
-                            it.setAnalyzer(cameraExecutor, BarcodeAnalyzer { barcode ->
-                                android.util.Log.d("VisionBarcodeScanner", "Barcode detected: $barcode")
-                                eventSink?.success(barcode)
-                            })
+                            val scannerOptions = getBarcodeScannerOptions(formats)
+                            it.setAnalyzer(cameraExecutor, BarcodeAnalyzer(
+                                scannerOptions = scannerOptions,
+                                onBarcodeDetected = { barcode, imageProxy ->
+                                    if (isScanning) {
+                                        android.util.Log.d("VisionBarcodeScanner", "Barcode detected: $barcode")
+                                        lastImageProxy = imageProxy
+                                        eventSink?.success(barcode)
+                                    } else {
+                                        imageProxy.close()
+                                    }
+                                }
+                            ))
                         }
 
                     camera = cameraProvider?.bindToLifecycle(
@@ -245,12 +396,11 @@ class VisionCameraView(
         get() = lifecycleRegistry
 }
 
-class BarcodeAnalyzer(private val onBarcodeDetected: (String) -> Unit) : ImageAnalysis.Analyzer {
-    private val barcodeScanner = BarcodeScanning.getClient(
-        BarcodeScannerOptions.Builder()
-            .setBarcodeFormats(Barcode.FORMAT_ALL_FORMATS)
-            .build()
-    )
+class BarcodeAnalyzer(
+    private val scannerOptions: BarcodeScannerOptions,
+    private val onBarcodeDetected: (String, ImageProxy) -> Unit
+) : ImageAnalysis.Analyzer {
+    private val barcodeScanner = BarcodeScanning.getClient(scannerOptions)
 
     override fun analyze(imageProxy: ImageProxy) {
         val mediaImage = imageProxy.image
@@ -262,14 +412,15 @@ class BarcodeAnalyzer(private val onBarcodeDetected: (String) -> Unit) : ImageAn
                     barcodes.firstOrNull()?.let { barcode ->
                         barcode.rawValue?.let { value ->
                             android.util.Log.d("VisionBarcodeScanner", "Barcode detected: $value")
-                            onBarcodeDetected(value)
+                            // Don't close the imageProxy here - we need it for capture
+                            onBarcodeDetected(value, imageProxy)
+                            return@addOnSuccessListener
                         }
                     }
+                    imageProxy.close()
                 }
                 .addOnFailureListener { exception ->
                     android.util.Log.e("VisionBarcodeScanner", "Barcode scanning error: ${exception.message}", exception)
-                }
-                .addOnCompleteListener {
                     imageProxy.close()
                 }
         } else {
