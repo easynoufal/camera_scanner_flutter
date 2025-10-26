@@ -249,47 +249,59 @@ class VisionCameraView(
 
     private fun imageProxyToByteArray(imageProxy: ImageProxy): ByteArray {
         val mediaImage = imageProxy.image ?: throw IllegalArgumentException("Image is null")
-        
-        // Get the bitmap from media image
-        val yBuffer = imageProxy.planes[0].buffer
-        val uBuffer = imageProxy.planes[1].buffer
-        val vBuffer = imageProxy.planes[2].buffer
 
-        val ySize = yBuffer.remaining()
-        val uSize = uBuffer.remaining()
-        val vSize = vBuffer.remaining()
-
-        val nv21 = ByteArray(ySize + uSize + vSize)
-        
-        yBuffer.get(nv21, 0, ySize)
-        vBuffer.get(nv21, ySize, vSize)
-        uBuffer.get(nv21, ySize + vSize, uSize)
-
-        val yuvImage = YuvImage(nv21, ImageFormat.NV21, mediaImage.width, mediaImage.height, null)
-        val out = ByteArrayOutputStream()
-        
-        // Compress to bitmap first to handle rotation
-        yuvImage.compressToJpeg(android.graphics.Rect(0, 0, mediaImage.width, mediaImage.height), 90, out)
-        val jpegBytes = out.toByteArray()
-        
-        // Convert to bitmap and apply rotation
-        val bitmap = android.graphics.BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
-        
-        // Get rotation from ImageProxy
-        val rotationDegrees = imageProxy.imageInfo.rotationDegrees
-        
-        // Rotate bitmap if needed
-        val rotatedBitmap = if (rotationDegrees != 0) {
-            val matrix = android.graphics.Matrix()
-            matrix.postRotate(rotationDegrees.toFloat())
-            android.graphics.Bitmap.createBitmap(
-                bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true
-            )
-        } else {
-            bitmap
+        var bitmap: Bitmap? = try {
+            android.util.Log.d("VisionBarcodeScanner", "previewView.bitmap set")
+            previewView.bitmap
+        } catch (e: Exception) {
+            null
         }
-        
-        // Convert rotated bitmap back to JPEG
+        var rotatedBitmap: Bitmap
+
+        if(bitmap == null) {
+            // Get the bitmap from media image
+            android.util.Log.d("VisionBarcodeScanner", "bitmap is null")
+            val yBuffer = imageProxy.planes[0].buffer
+            val uBuffer = imageProxy.planes[1].buffer
+            val vBuffer = imageProxy.planes[2].buffer
+
+            val ySize = yBuffer.remaining()
+            val uSize = uBuffer.remaining()
+            val vSize = vBuffer.remaining()
+
+            val nv21 = ByteArray(ySize + uSize + vSize)
+
+            yBuffer.get(nv21, 0, ySize)
+            vBuffer.get(nv21, ySize, vSize)
+            uBuffer.get(nv21, ySize + vSize, uSize)
+
+            val yuvImage = YuvImage(nv21, ImageFormat.NV21, mediaImage.width, mediaImage.height, null)
+            val out = ByteArrayOutputStream()
+
+            // Compress to bitmap first to handle rotation
+            yuvImage.compressToJpeg(android.graphics.Rect(0, 0, mediaImage.width, mediaImage.height), 90, out)
+            val jpegBytes = out.toByteArray()
+
+            // Convert to bitmap and apply rotation
+            val bitmap = android.graphics.BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
+
+            // Get rotation from ImageProxy
+            val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+
+            // Rotate bitmap if needed
+            rotatedBitmap = if (rotationDegrees != 0) {
+                val matrix = android.graphics.Matrix()
+                matrix.postRotate(rotationDegrees.toFloat())
+                android.graphics.Bitmap.createBitmap(
+                    bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true
+                )
+            } else {
+                bitmap
+            }
+        } else {
+            rotatedBitmap =  bitmap
+        }
+
         val finalOut = ByteArrayOutputStream()
         rotatedBitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, finalOut)
         
