@@ -45,9 +45,14 @@ class _MyAppState extends State<MyApp> {
     });
   }
 
-  void _onBarcodeDetected(String barcode) {
+  void _onBarcodeDetected(String barcode, bool? isQRCode) {
     setState(() {
       scannedCode = barcode;
+      if (isQRCode == true) {
+        print('Detected QR Code: $barcode');
+      } else {
+        print('Detected Barcode: $barcode');
+      }
     });
   }
   
@@ -98,6 +103,18 @@ class _MyAppState extends State<MyApp> {
                             style:
                                 const TextStyle(color: Colors.white, fontSize: 20),
                           ),
+                          if (scannedCode != null && controller.detectedBarcodeType != null)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 8),
+                              child: Text(
+                                'Type: ${controller.detectedBarcodeType}',
+                                style: const TextStyle(
+                                  color: Colors.yellowAccent,
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
                           if (scannedCode != null)
                             Padding(
                               padding: const EdgeInsets.only(top: 16),

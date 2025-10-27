@@ -347,13 +347,35 @@ class VisionCameraView(
                         .build()
                         .also {
                             val scannerOptions = getBarcodeScannerOptions(formats)
+                            val viewportHeight = (134 * context.resources.displayMetrics.density).toInt()
+                            val topMargin = (148 * context.resources.displayMetrics.density).toInt()
+                            
+                            // Calculate the absolute top position of the camera view on the screen
+                            val location = IntArray(2)
+                            previewView.getLocationOnScreen(location)
+                            val viewAbsoluteTop = location[1]  // Use [1] for Y coordinate, [0] is X
+                            val viewAbsoluteLeft = location[0]
+                            
+                            android.util.Log.d("VisionBarcodeScanner", "View absolute position: ($viewAbsoluteLeft, $viewAbsoluteTop), Top margin: $topMargin, Viewport height: $viewportHeight")
+                            android.util.Log.d("VisionBarcodeScanner", "PreviewView size: ${previewView.width}x${previewView.height}, Image resolution: ${resolution.width}x${resolution.height}")
+                            
                             it.setAnalyzer(cameraExecutor, BarcodeAnalyzer(
                                 scannerOptions = scannerOptions,
-                                onBarcodeDetected = { barcode, imageProxy ->
+                                viewportHeight = viewportHeight,
+                                topMargin = topMargin,
+                                viewAbsoluteTop = viewAbsoluteTop,
+                                viewHeight = previewView.height,
+                                imageHeight = resolution.height,
+                                imageWidth = resolution.width,
+                                onBarcodeDetected = { barcode, barcodeType, imageProxy ->
                                     if (isScanning) {
-                                        android.util.Log.d("VisionBarcodeScanner", "Barcode detected: $barcode")
+                                        android.util.Log.d("VisionBarcodeScanner", "Barcode detected: $barcode (type: $barcodeType)")
                                         lastImageProxy = imageProxy
-                                        eventSink?.success(barcode)
+                                        // Send barcode value and type as a map
+                                        eventSink?.success(mapOf(
+                                            "value" to barcode,
+                                            "type" to barcodeType
+                                        ))
                                     } else {
                                         imageProxy.close()
                                     }
@@ -410,23 +432,103 @@ class VisionCameraView(
 
 class BarcodeAnalyzer(
     private val scannerOptions: BarcodeScannerOptions,
-    private val onBarcodeDetected: (String, ImageProxy) -> Unit
+    private val viewportHeight: Int,
+    private val topMargin: Int,
+    private val viewAbsoluteTop: Int,
+    private val viewHeight: Int,
+    private val imageHeight: Int,
+    private val imageWidth: Int,
+    private val onBarcodeDetected: (String, String, ImageProxy) -> Unit
 ) : ImageAnalysis.Analyzer {
     private val barcodeScanner = BarcodeScanning.getClient(scannerOptions)
+    
+    private fun getBarcodeTypeName(format: Int): String {
+        return when (format) {
+            Barcode.FORMAT_AZTEC -> "aztec"
+            Barcode.FORMAT_CODABAR -> "codabar"
+            Barcode.FORMAT_CODE_128 -> "code128"
+            Barcode.FORMAT_CODE_39 -> "code39"
+            Barcode.FORMAT_CODE_93 -> "code93"
+            Barcode.FORMAT_DATA_MATRIX -> "dataMatrix"
+            Barcode.FORMAT_EAN_13 -> "ean13"
+            Barcode.FORMAT_EAN_8 -> "ean8"
+            Barcode.FORMAT_ITF -> "itf"
+            Barcode.FORMAT_PDF417 -> "pdf417"
+            Barcode.FORMAT_QR_CODE -> "qrCode"
+            Barcode.FORMAT_UPC_A -> "upca"
+            Barcode.FORMAT_UPC_E -> "upce"
+            else -> "unknown"
+        }
+    }
+
+    private fun isBarcodeInViewport(barcode: Barcode, imageHeight: Int, imageWidth: Int, rotationDegrees: Int): Boolean {
+        val boundingBox = barcode.boundingBox ?: return false
+        
+        // Step 1: Get barcode Y coordinate from ML Kit (in image coordinate system)
+        val barcodeCenterY = boundingBox.exactCenterY()
+        
+        // Step 2: Determine the effective image dimension based on rotation
+        // At 90/270°, the camera sensor is landscape but image is in portrait orientation
+        // At 0/180°, the camera sensor and image are both in portrait orientation
+        val effectiveImageHeight = when (rotationDegrees) {
+            90, 270 -> imageWidth   // Landscape orientation: width is the vertical axis
+            else -> imageHeight      // Portrait orientation: height is the vertical axis
+        }
+        
+        // Step 3: Calculate the viewport center in image coordinates
+        // The overlay is positioned at `topMargin` pixels from the top of the Flutter view
+        // We need to map this to the image coordinate system
+        
+        // Step 3a: Calculate where the overlay is within the PreviewView (in pixels)
+        // topMargin is in dp, converted to pixels (already done)
+        val overlayTopInView = topMargin  // Distance from top of PreviewView to top of overlay
+        
+        // Step 3b: Map the overlay position from view coordinates to image coordinates
+        // PreviewView might be cropped/fitted to the camera preview, so we need to account for scaling
+        // The image aspect ratio might differ from the view aspect ratio
+        
+        // Map the overlay top position to image coordinates using the actual view and image dimensions
+        val overlayTopInImage = overlayTopInView * (effectiveImageHeight.toFloat() / viewHeight.toFloat())
+        
+        // Step 4: Calculate the viewport bounds in image coordinates
+        val viewportTop = overlayTopInImage
+        val viewportBottom = overlayTopInImage + viewportHeight
+        
+        // Step 5: Check if barcode center is within the viewport
+        val isInViewport = barcodeCenterY >= viewportTop && barcodeCenterY <= viewportBottom
+        
+        // Detailed logging for debugging
+        android.util.Log.d("VisionBarcodeScanner", "=== Viewport Calculation ===")
+        android.util.Log.d("VisionBarcodeScanner", "Rotation: $rotationDegrees°, Image size: ${imageWidth}x${imageHeight}")
+        android.util.Log.d("VisionBarcodeScanner", "Effective image height: $effectiveImageHeight, View height: $viewHeight")
+        android.util.Log.d("VisionBarcodeScanner", "Overlay top in view: ${overlayTopInView}px, In image: ${overlayTopInImage}px")
+        android.util.Log.d("VisionBarcodeScanner", "Viewport bounds: [$viewportTop, $viewportBottom]")
+        android.util.Log.d("VisionBarcodeScanner", "Barcode center Y: $barcodeCenterY, In viewport: $isInViewport")
+        android.util.Log.d("VisionBarcodeScanner", "Barcode bounding box: [${boundingBox.left}, ${boundingBox.top}, ${boundingBox.right}, ${boundingBox.bottom}]")
+        
+        return isInViewport
+    }
 
     override fun analyze(imageProxy: ImageProxy) {
         val mediaImage = imageProxy.image
         if (mediaImage != null) {
-            val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
+            val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+            val image = InputImage.fromMediaImage(mediaImage, rotationDegrees)
             
             barcodeScanner.process(image)
                 .addOnSuccessListener { barcodes ->
                     barcodes.firstOrNull()?.let { barcode ->
-                        barcode.rawValue?.let { value ->
-                            android.util.Log.d("VisionBarcodeScanner", "Barcode detected: $value")
-                            // Don't close the imageProxy here - we need it for capture
-                            onBarcodeDetected(value, imageProxy)
-                            return@addOnSuccessListener
+                        // Check if barcode is within viewport (accounting for rotation)
+                        if (isBarcodeInViewport(barcode, mediaImage.height, mediaImage.width, rotationDegrees)) {
+                            barcode.rawValue?.let { value ->
+                                val barcodeType = getBarcodeTypeName(barcode.format)
+                                android.util.Log.d("VisionBarcodeScanner", "Barcode in viewport: $value (type: $barcodeType)")
+                                // Don't close the imageProxy here - we need it for capture
+                                onBarcodeDetected(value, barcodeType, imageProxy)
+                                return@addOnSuccessListener
+                            }
+                        } else {
+                            android.util.Log.d("VisionBarcodeScanner", "Barcode outside viewport, ignoring")
                         }
                     }
                     imageProxy.close()
