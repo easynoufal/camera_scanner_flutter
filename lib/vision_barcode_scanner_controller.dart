@@ -13,6 +13,10 @@ class VisionBarcodeScannerController {
   
   bool get isScanning => _state?.isScanning ?? false;
   
+  String? get detectedBarcode => _state?.detectedBarcode;
+  
+  String? get detectedBarcodeType => _state?.detectedBarcodeType;
+  
   void attachState(dynamic state) {
     _state = state;
   }

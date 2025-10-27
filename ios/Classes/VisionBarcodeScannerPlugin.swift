@@ -280,10 +280,19 @@ public class VisionCameraView: NSObject, FlutterPlatformView, AVCaptureVideoData
             guard let self = self, self.isScanning else { return }
             guard let results = request.results as? [VNBarcodeObservation] else { return }
             for barcode in results {
-                // Filter by supported format if specified
-                if self.shouldProcessBarcode(barcode) {
-                    if let payload = barcode.payloadStringValue {
-                        self.eventSink?(payload)
+                // Check if barcode is in viewport (134dp height centered)
+                if self.isBarcodeInViewport(barcode, imageHeight: CVPixelBufferGetHeight(pixelBuffer)) {
+                    // Filter by supported format if specified
+                    if self.shouldProcessBarcode(barcode) {
+                        if let payload = barcode.payloadStringValue {
+                            let barcodeType = self.symbologyToString(barcode.symbology)
+                            print("Barcode detected: \(payload) (type: \(barcodeType))")
+                            // Send barcode value and type as a dictionary
+                            self.eventSink?([
+                                "value": payload,
+                                "type": barcodeType
+                            ])
+                        }
                     }
                 }
             }
@@ -325,6 +334,25 @@ public class VisionCameraView: NSObject, FlutterPlatformView, AVCaptureVideoData
         }
     }
     
+    private func symbologyToString(_ symbology: VNBarcodeSymbology) -> String {
+        switch symbology {
+        case .aztec: return "aztec"
+        case .codabar: return "codabar"
+        case .Code128: return "code128"
+        case .Code39: return "code39"
+        case .Code93: return "code93"
+        case .dataMatrix: return "dataMatrix"
+        case .EAN13: return "ean13"
+        case .EAN8: return "ean8"
+        case .ITF14: return "itf"
+        case .PDF417: return "pdf417"
+        case .QR: return "qrCode"
+        case .UPCE: return "upca"
+        case .UPCA: return "upce"
+        default: return "unknown"
+        }
+    }
+    
     private func shouldProcessBarcode(_ barcode: VNBarcodeObservation) -> Bool {
         guard let formats = formats, !formats.isEmpty else { return true }
         
@@ -340,6 +368,25 @@ public class VisionCameraView: NSObject, FlutterPlatformView, AVCaptureVideoData
         }
         
         return false
+    }
+    
+    private func isBarcodeInViewport(_ barcode: VNBarcodeObservation, imageHeight: Int) -> Bool {
+        // 134dp converted to pixels based on screen density
+        let viewportHeight: CGFloat = 134.0 * UIScreen.main.scale
+        let viewportHeightInPixels = Int(viewportHeight)
+        
+        // Calculate viewport bounds (centered vertically)
+        let viewportTop = (imageHeight - viewportHeightInPixels) / 2
+        let viewportBottom = viewportTop + viewportHeightInPixels
+        
+        // Bounding box is in normalized coordinates (0-1), convert to pixel coordinates
+        let boundingBox = barcode.boundingBox
+        let barcodeCenterY = Int(boundingBox.midY * CGFloat(imageHeight))
+        
+        // Check if barcode center is within viewport
+        print("Barcode center Y: \(barcodeCenterY), Viewport: [\(viewportTop), \(viewportBottom)]")
+        
+        return barcodeCenterY >= viewportTop && barcodeCenterY <= viewportBottom
     }
     
     private func stopScanningAndCapture(result: @escaping FlutterResult) {

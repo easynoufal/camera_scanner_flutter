@@ -25,7 +25,7 @@ enum BarcodeFormat {
 }
 
 class VisionBarcodeScannerView extends StatefulWidget {
-  final void Function(String barcode)? onBarcodeDetected;
+  final void Function(String barcode, bool? isQRCode)? onBarcodeDetected;
   final bool shouldShowOverlay;
   final bool shouldShowTorch;
   final VisionBarcodeScannerController? controller;
@@ -54,6 +54,7 @@ class _VisionBarcodeScannerViewState extends State<VisionBarcodeScannerView> {
   bool _isScanning = true;
   Uint8List? _capturedFrame;
   String? _detectedBarcode;
+  String? _detectedBarcodeType;
   bool _isTorchOn = false;
   
   @override
@@ -116,12 +117,32 @@ class _VisionBarcodeScannerViewState extends State<VisionBarcodeScannerView> {
     }
   }
 
-  void _handleBarcodeDetected(String barcode) {
+  void _handleBarcodeDetected(dynamic data) {
     if (_isScanning && widget.onBarcodeDetected != null) {
+      // Handle both old format (String) and new format (Map with value and type)
+      String barcodeValue;
+      String? barcodeType;
+      
+      if (data is Map) {
+        barcodeValue = data['value'] as String;
+        barcodeType = data['type'] as String?;
+      } else if (data is String) {
+        barcodeValue = data;
+        barcodeType = null;
+      } else {
+        return;
+      }
+      
       setState(() {
-        _detectedBarcode = barcode;
+        _detectedBarcode = barcodeValue;
+        _detectedBarcodeType = barcodeType;
       });
-      widget.onBarcodeDetected!(barcode);
+      
+      // Check if it's a QR code
+      bool isQRCode = barcodeType?.toLowerCase() == 'qrcode';
+      
+      // Call callback with barcode value and isQRCode flag
+      widget.onBarcodeDetected!(barcodeValue, isQRCode);
       _stopScanningAndCapture();
     }
   }
@@ -131,6 +152,7 @@ class _VisionBarcodeScannerViewState extends State<VisionBarcodeScannerView> {
       _isScanning = true;
       _capturedFrame = null;
       _detectedBarcode = null;
+      _detectedBarcodeType = null;
     });
   }
   
@@ -139,6 +161,9 @@ class _VisionBarcodeScannerViewState extends State<VisionBarcodeScannerView> {
       _isScanning = false;
     });
   }
+  
+  String? get detectedBarcode => _detectedBarcode;
+  String? get detectedBarcodeType => _detectedBarcodeType;
 
   Widget _buildTorchIcon() {
     return SvgPicture.asset(
@@ -166,7 +191,6 @@ class _VisionBarcodeScannerViewState extends State<VisionBarcodeScannerView> {
               MethodChannel('vision_barcode_scanner/methods_$viewId');
           _subscription = _eventChannel!
               .receiveBroadcastStream()
-              .cast<String>()
               .listen(_handleBarcodeDetected);
         },
         creationParams: {'formats': formatsList},
@@ -181,7 +205,6 @@ class _VisionBarcodeScannerViewState extends State<VisionBarcodeScannerView> {
               MethodChannel('vision_barcode_scanner/methods_$viewId');
           _subscription = _eventChannel!
               .receiveBroadcastStream()
-              .cast<String>()
               .listen(_handleBarcodeDetected);
         },
         creationParams: {'formats': formatsList},
@@ -207,15 +230,10 @@ class _VisionBarcodeScannerViewState extends State<VisionBarcodeScannerView> {
 
         if (widget.shouldShowOverlay && (_capturedFrame == null || _isScanning))
           Positioned(
-            top: 0,
+            top: 148,
             left: 0,
             right: 0,
-            child: SizedBox(
-              height: MediaQuery.of(context).size.height * 0.60,
-              child: const Center(
-                child: _ScannerOverlay(),
-              ),
-            ),
+            child: _ScannerOverlay(),
           ),
 
         // Torch icon button positioned at top right
