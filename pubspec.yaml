@@ -45,6 +45,7 @@ flutter:
     - assets/torch_off.svg
     - assets/torch_on.svg
     - assets/ic_scanner_view.svg
+    - assets/ic_scanner_view_qr.svg
   #
   # For details regarding assets in packages, see
   # https://flutter.dev/to/asset-from-package

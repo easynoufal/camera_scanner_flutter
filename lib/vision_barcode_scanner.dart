@@ -233,7 +233,9 @@ class _VisionBarcodeScannerViewState extends State<VisionBarcodeScannerView> {
             top: 148,
             left: 0,
             right: 0,
-            child: _ScannerOverlay(),
+            child: _ScannerOverlay(
+              isQRCode: widget.formats.length == 1 && widget.formats.contains(BarcodeFormat.qrCode),
+            ),
           ),
 
         // Torch icon button positioned at top right
@@ -252,10 +254,18 @@ class _VisionBarcodeScannerViewState extends State<VisionBarcodeScannerView> {
 }
 
 class _ScannerOverlay extends StatelessWidget {
-  const _ScannerOverlay();
+  const _ScannerOverlay({required this.isQRCode});
+  final bool isQRCode;
 
   @override
   Widget build(BuildContext context) {
+    if(isQRCode){
+      return SvgPicture.asset(
+        'packages/vision_barcode_scanner/assets/ic_scanner_view_qr.svg',
+        width: 238,
+        height: 137,
+      );
+    }
     return SvgPicture.asset(
       'packages/vision_barcode_scanner/assets/ic_scanner_view.svg',
       width: 238,
