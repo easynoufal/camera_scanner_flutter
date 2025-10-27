@@ -47,13 +47,11 @@ class VisionBarcodeScannerView extends StatefulWidget {
 
 class _VisionBarcodeScannerViewState extends State<VisionBarcodeScannerView> {
   static const String _viewType = 'VisionCameraView';
-  static int _viewIdCounter = 0;
   EventChannel? _eventChannel;
   MethodChannel? _methodChannel;
   StreamSubscription? _subscription;
   bool _isScanning = true;
   Uint8List? _capturedFrame;
-  String? _detectedBarcode;
   bool _isTorchOn = false;
   
   @override
@@ -67,6 +65,7 @@ class _VisionBarcodeScannerViewState extends State<VisionBarcodeScannerView> {
 
   @override
   void dispose() {
+    turnOffTorch(); // Ensure torch is turned off
     _subscription?.cancel();
     super.dispose();
   }
@@ -117,27 +116,46 @@ class _VisionBarcodeScannerViewState extends State<VisionBarcodeScannerView> {
   }
 
   void _handleBarcodeDetected(String barcode) {
-    if (_isScanning && widget.onBarcodeDetected != null) {
-      setState(() {
-        _detectedBarcode = barcode;
-      });
+    // Only process barcode if currently scanning and callback is set
+    if (_isScanning && widget.onBarcodeDetected != null && mounted) {
+      debugPrint('VisionBarcodeScanner: Barcode detected: $barcode');
       widget.onBarcodeDetected!(barcode);
       _stopScanningAndCapture();
+    } else {
+      debugPrint('VisionBarcodeScanner: Ignoring barcode detection - isScanning: $_isScanning, hasCallback: ${widget.onBarcodeDetected != null}');
     }
   }
 
   void startScanning() {
-    setState(() {
-      _isScanning = true;
-      _capturedFrame = null;
-      _detectedBarcode = null;
-    });
+    if (!_isScanning) {
+      setState(() {
+        _isScanning = true;
+        _capturedFrame = null; // Clear captured frame to resume live scanning
+      });
+    }
   }
   
   void stopScanning() {
     setState(() {
       _isScanning = false;
     });
+  }
+  
+  bool get isScanning => _isScanning;
+  
+  Future<void> turnOffTorch() async {
+    if (_isTorchOn && _methodChannel != null && mounted) {
+      try {
+        final result = await _methodChannel?.invokeMethod<bool>('toggleTorch');
+        if (result != null && mounted) {
+          setState(() {
+            _isTorchOn = result;
+          });
+        }
+      } catch (e) {
+        debugPrint('Error turning off torch: $e');
+      }
+    }
   }
 
   Widget _buildTorchIcon() {
@@ -168,6 +186,9 @@ class _VisionBarcodeScannerViewState extends State<VisionBarcodeScannerView> {
               .receiveBroadcastStream()
               .cast<String>()
               .listen(_handleBarcodeDetected);
+          
+          // Send formats via method channel as workaround for UiKitView creationParams issue
+          _methodChannel?.invokeMethod('setFormats', formatsList);
         },
         creationParams: {'formats': formatsList},
         creationParamsCodec: const StandardMessageCodec(),
@@ -183,6 +204,9 @@ class _VisionBarcodeScannerViewState extends State<VisionBarcodeScannerView> {
               .receiveBroadcastStream()
               .cast<String>()
               .listen(_handleBarcodeDetected);
+          
+          // Send formats via method channel for Android as well
+          _methodChannel?.invokeMethod('setFormats', formatsList);
         },
         creationParams: {'formats': formatsList},
         creationParamsCodec: const StandardMessageCodec(),
@@ -193,28 +217,23 @@ class _VisionBarcodeScannerViewState extends State<VisionBarcodeScannerView> {
     }
 
     return Stack(
+      clipBehavior: Clip.hardEdge,
       children: [
         // Show captured frame as frozen preview or live camera
-        if (_capturedFrame != null && !_isScanning)
-          Image.memory(
-            _capturedFrame!,
-            fit: BoxFit.cover,
-            width: double.infinity,
-            height: double.infinity,
-          )
-        else
-          cameraView,
+        Positioned.fill(
+          child: _capturedFrame != null && !_isScanning
+              ? Image.memory(
+                  _capturedFrame!,
+                  fit: BoxFit.cover,
+                )
+              : cameraView,
+        ),
 
         if (widget.shouldShowOverlay && (_capturedFrame == null || _isScanning))
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: SizedBox(
-              height: MediaQuery.of(context).size.height * 0.60,
-              child: const Center(
-                child: _ScannerOverlay(),
-              ),
+          Positioned.fill(
+            child: Align(
+              alignment: Alignment.center,
+              child: const _ScannerOverlay(),
             ),
           ),
 

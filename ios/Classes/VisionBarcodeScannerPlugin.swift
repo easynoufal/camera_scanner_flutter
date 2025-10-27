@@ -96,7 +96,6 @@ class CameraContainerView: UIView {
         if let cameraView = cameraView,
            let previewLayer = cameraView.previewLayer {
             previewLayer.frame = bounds
-            print("Preview layer frame updated to: \(previewLayer.frame)")
         }
     }
 }
@@ -138,7 +137,7 @@ public class VisionCameraView: NSObject, FlutterPlatformView, AVCaptureVideoData
     private var isScanning = true
     private var lastSampleBuffer: CMSampleBuffer?
     private let viewId: Int64
-    private let formats: [String]?
+    private var formats: [String]?
 
     public init(frame: CGRect, viewId: Int64, messenger: FlutterBinaryMessenger, formats: [String]?) {
         self.frame = frame
@@ -149,25 +148,43 @@ public class VisionCameraView: NSObject, FlutterPlatformView, AVCaptureVideoData
             binaryMessenger: messenger
         )
         super.init()
-        self.eventChannel.setStreamHandler(self)
         
         // Setup method channel
         self.methodChannel = FlutterMethodChannel(
             name: "vision_barcode_scanner/methods_\(viewId)",
             binaryMessenger: messenger
         )
-        self.methodChannel?.setMethodCallHandler { [weak self] call, result in
-            switch call.method {
-            case "stopScanningAndCapture":
-                self?.stopScanningAndCapture(result: result)
-            case "toggleTorch":
-                self?.toggleTorch(result: result)
-            default:
-                result(FlutterMethodNotImplemented)
-            }
-        }
         
-        setupCamera()
+        // Setup everything asynchronously to avoid initialization issues
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            
+            // Set stream handler after init
+            self.eventChannel.setStreamHandler(self)
+            
+            // Set method call handler
+            self.methodChannel?.setMethodCallHandler { [weak self] call, result in
+                switch call.method {
+                case "stopScanningAndCapture":
+                    self?.stopScanningAndCapture(result: result)
+                case "toggleTorch":
+                    self?.toggleTorch(result: result)
+                case "setFormats":
+                    // Handle formats being passed via method call
+                    if let formats = call.arguments as? [String] {
+                        self?.formats = formats
+                        result(true)
+                    } else {
+                        result(false)
+                    }
+                default:
+                    result(FlutterMethodNotImplemented)
+                }
+            }
+            
+            // Setup camera
+            self.setupCamera()
+        }
     }
     
     deinit {
@@ -198,45 +215,52 @@ public class VisionCameraView: NSObject, FlutterPlatformView, AVCaptureVideoData
             previewLayer.frame = view.bounds
             previewLayer.videoGravity = .resizeAspectFill
             view.layer.addSublayer(previewLayer)
-            
-            print("Preview layer added to view with frame: \(previewLayer.frame)")
         }
     }
 
     private func setupCamera() {
-        print("Setting up camera...")
-        // Request camera permission
-        AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
-            DispatchQueue.main.async {
-                if granted {
-                    print("Camera permission granted")
-                    self?.startCameraSession()
-                } else {
-                    print("Camera permission denied")
+        // Check current permission status
+        let status = AVCaptureDevice.authorizationStatus(for: .video)
+        
+        switch status {
+        case .authorized:
+            // Permission already granted, start camera
+            startCameraSession()
+        case .notDetermined:
+            // Request permission
+            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+                DispatchQueue.main.async {
+                    if granted {
+                        self?.startCameraSession()
+                    }
                 }
             }
+        case .denied, .restricted:
+            break
+        @unknown default:
+            break
         }
     }
     
     private func startCameraSession() {
-        print("Starting camera session...")
         captureSession = AVCaptureSession()
         captureSession?.sessionPreset = .high
         
-        guard let videoDevice = AVCaptureDevice.default(for: .video),
-              let videoInput = try? AVCaptureDeviceInput(device: videoDevice)
-        else { 
-            print("Failed to get video device or input")
-            return 
+        guard let videoDevice = AVCaptureDevice.default(for: .video) else {
+            return
+        }
+        
+        let videoInput: AVCaptureDeviceInput
+        do {
+            videoInput = try AVCaptureDeviceInput(device: videoDevice)
+        } catch {
+            return
         }
         
         self.videoDevice = videoDevice
 
         if captureSession?.canAddInput(videoInput) == true {
             captureSession?.addInput(videoInput)
-            print("Video input added to session")
-        } else {
-            print("Failed to add video input to session")
         }
 
         let output = AVCaptureVideoDataOutput()
@@ -244,26 +268,27 @@ public class VisionCameraView: NSObject, FlutterPlatformView, AVCaptureVideoData
         
         if captureSession?.canAddOutput(output) == true {
             captureSession?.addOutput(output)
-            print("Video output added to session")
-        } else {
-            print("Failed to add video output to session")
+            // Set video orientation to portrait
+            if let connection = output.connection(with: .video) {
+                connection.videoOrientation = .portrait
+            }
         }
 
-        previewLayer = AVCaptureVideoPreviewLayer(session: captureSession!)
+        guard let session = captureSession else {
+            return
+        }
+        
+        previewLayer = AVCaptureVideoPreviewLayer(session: session)
         previewLayer?.videoGravity = .resizeAspectFill
-        print("Preview layer created")
+        previewLayer?.connection?.videoOrientation = .portrait
         
         // Add preview layer to container view if it exists
-        if let containerView = containerView {
-            print("Adding preview layer to existing container view")
-            addPreviewLayer(to: containerView)
-        } else {
-            print("Container view not available yet")
-        }
+            if let containerView = containerView {
+                addPreviewLayer(to: containerView)
+            }
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.captureSession?.startRunning()
-            print("Camera session started")
         }
     }
 
@@ -274,13 +299,29 @@ public class VisionCameraView: NSObject, FlutterPlatformView, AVCaptureVideoData
             lastSampleBuffer = sampleBuffer
         }
         
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { 
+            return 
+        }
 
         let request = VNDetectBarcodesRequest { [weak self] request, error in
             guard let self = self, self.isScanning else { return }
+            
+            if let error = error {
+                return
+            }
+            
             guard let results = request.results as? [VNBarcodeObservation] else { return }
+            
+            // NEVER allow QR codes unless explicitly in formats
+            let isQRAllowed = self.formats?.contains("qrCode") == true || self.formats?.contains("allFormats") == true
+            
             for barcode in results {
-                // Filter by supported format if specified
+                // ABSOLUTE BLOCK: Reject QR codes if not in formats
+                if barcode.symbology == .QR && !isQRAllowed {
+                    continue
+                }
+                
+                // Process other barcode types through normal filtering
                 if self.shouldProcessBarcode(barcode) {
                     if let payload = barcode.payloadStringValue {
                         self.eventSink?(payload)
@@ -297,19 +338,23 @@ public class VisionCameraView: NSObject, FlutterPlatformView, AVCaptureVideoData
                     symbologies.append(symbology)
                 }
             }
+            // Force set symbologies - this tells Vision to ONLY detect these types
             if !symbologies.isEmpty {
                 request.symbologies = symbologies
             }
         }
 
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
-        try? handler.perform([request])
+        do {
+            try handler.perform([request])
+        } catch {
+            // Handle Vision error silently
+        }
     }
     
     private func symbologyFromString(_ format: String) -> VNBarcodeSymbology? {
         switch format {
         case "aztec": return .aztec
-        case "codabar": return .codabar
         case "code128": return .Code128
         case "code39": return .Code39
         case "code93": return .Code93
@@ -319,14 +364,24 @@ public class VisionCameraView: NSObject, FlutterPlatformView, AVCaptureVideoData
         case "itf": return .ITF14
         case "pdf417": return .PDF417
         case "qrCode": return .QR
-        case "upca": return .UPCE
-        case "upce": return .UPCA
-        default: return nil
+        case "upca": return .EAN13  // UPC-A is compatible with EAN-13
+        case "upce": return .EAN8   // UPC-E is compatible with EAN-8
+        default:
+            if #available(iOS 15.0, *) {
+                if format == "codabar" {
+                    return .codabar
+                }
+            }
+            return nil
         }
     }
     
     private func shouldProcessBarcode(_ barcode: VNBarcodeObservation) -> Bool {
-        guard let formats = formats, !formats.isEmpty else { return true }
+        // If formats are specified, check them
+        guard let formats = formats, !formats.isEmpty else { 
+            // No formats specified - allow all barcode types
+            return true
+        }
         
         if formats.contains("allFormats") {
             return true
@@ -339,11 +394,11 @@ public class VisionCameraView: NSObject, FlutterPlatformView, AVCaptureVideoData
             }
         }
         
+        // Symbol not in the allowed formats list
         return false
     }
     
     private func stopScanningAndCapture(result: @escaping FlutterResult) {
-        print("stopScanningAndCapture called")
         isScanning = false
         
         guard let sampleBuffer = lastSampleBuffer else {
@@ -356,15 +411,8 @@ public class VisionCameraView: NSObject, FlutterPlatformView, AVCaptureVideoData
             return
         }
         
-        // Get image orientation from sample buffer
-        var orientation = CGImagePropertyOrientation.up
-        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[String: Any]],
-           let exifDict = attachments.first,
-           let orientationRaw = exifDict[kCGImagePropertyOrientation as String] as? UInt32 {
-            orientation = CGImagePropertyOrientation(rawValue: orientationRaw) ?? .up
-        }
-        
-        // Convert CIImage to UIImage with correct orientation
+        // Convert CIImage to UIImage - NO orientation adjustment
+        // Camera captures in native sensor orientation (landscape)
         let ciImage = CIImage(cvPixelBuffer: imageBuffer)
         let context = CIContext()
         guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
@@ -372,11 +420,11 @@ public class VisionCameraView: NSObject, FlutterPlatformView, AVCaptureVideoData
             return
         }
         
-        // Create UIImage with proper orientation
-        let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: UIImage.Orientation(rawValue: orientation.rawValue) ?? .up)
+        // Create UIImage from raw camera buffer - no rotation
+        let uiImage = UIImage(cgImage: cgImage)
         
-        // Convert UIImage to JPEG data
-        if let imageData = uiImage.jpegData(compressionQuality: 0.9) {
+        // Convert UIImage to JPEG data with maximum quality
+        if let imageData = uiImage.jpegData(compressionQuality: 1.0) {
             result(["imageData": FlutterStandardTypedData(bytes: imageData)])
         } else {
             result(FlutterError(code: "IMAGE_ENCODING", message: "Failed to encode image", details: nil))
@@ -386,8 +434,6 @@ public class VisionCameraView: NSObject, FlutterPlatformView, AVCaptureVideoData
     }
     
     private func toggleTorch(result: @escaping FlutterResult) {
-        print("toggleTorch called")
-        
         guard let device = videoDevice else {
             result(FlutterError(code: "NO_DEVICE", message: "No video device available", details: nil))
             return
@@ -400,17 +446,18 @@ public class VisionCameraView: NSObject, FlutterPlatformView, AVCaptureVideoData
         
         do {
             try device.lockForConfiguration()
-            let newState = !device.isTorchOn
-            try device.setTorchModeOn(level: 1.0)
-            if !newState {
+            let currentTorchMode = device.torchMode
+            let newState = (currentTorchMode == .off)
+            
+            if newState {
+                try device.setTorchModeOn(level: 1.0)
+            } else {
                 device.torchMode = .off
             }
             device.unlockForConfiguration()
             
-            print("Torch toggled: \(newState)")
             result(newState)
         } catch {
-            print("Error toggling torch: \(error)")
             result(FlutterError(code: "TORCH_ERROR", message: "Failed to toggle torch: \(error.localizedDescription)", details: nil))
         }
     }
