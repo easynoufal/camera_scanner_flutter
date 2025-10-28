@@ -3,6 +3,7 @@ package com.carrefour.vision_barcode_scanner
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.*
+import android.view.ViewGroup
 import androidx.camera.core.*
 import androidx.camera.core.Camera
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -124,7 +125,10 @@ class VisionCameraView(
 ) : PlatformView, LifecycleOwner {
 
     private val previewView: PreviewView = PreviewView(context).apply {
-        scaleType = PreviewView.ScaleType.FIT_CENTER
+        layoutParams = ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        )
         implementationMode = PreviewView.ImplementationMode.COMPATIBLE
     }
     private var cameraProvider: ProcessCameraProvider? = null
